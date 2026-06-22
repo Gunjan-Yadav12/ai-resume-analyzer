@@ -345,12 +345,12 @@ export const usePuterStore = create<PuterStore>((set, get) => {
                         },
                         {
                             type: "text",
-                            text:`Resume file path: ${path}\n\n${message}`,
+                            text: message,
                         },
                     ],
                 },
             ],
-            { model: "claude-sonnet-4-5"  }
+            { model: "claude-3-7-sonnet" }
         ) as Promise<AIResponse | undefined>;
     };
 
