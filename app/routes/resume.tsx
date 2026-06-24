@@ -1,77 +1,113 @@
-import type { Route } from "./+types/home";
-import Navbar from "~/components/Navbar";
-import ResumeCard from "~/components/ResumeCard";
-import {usePuterStore} from "~/lib/puter";
-import {Link, useNavigate} from "react-router";
-import {useEffect, useState} from "react";
+import { useEffect, useState } from 'react';
+import { useNavigate, useParams } from 'react-router';
+import Navbar from '~/components/Navbar';
+import Summary from '~/components/Summary';
+import ATS from '~/components/ATS';
+import Details from '~/components/Details';
 
-export function meta({}: Route.MetaArgs) {
-  return [
-    { title: "Resumind" },
-    { name: "description", content: "Smart feedback for your dream job!" },
-  ];
+type StoredAnalysis = {
+    id: string;
+    companyName: string;
+    jobTitle: string;
+    jobDescription?: string;
+    feedback?: Partial<Feedback> | null;
+    createdAt: number;
+};
+
+const EMPTY_CATEGORY: FeedbackCategory = {
+    score: 0,
+    tips: [],
+};
+
+function normalizeFeedback(raw?: Partial<Feedback> | null): Feedback {
+    return {
+        overallScore: raw?.overallScore ?? 0,
+        ATS: {
+            score: raw?.ATS?.score ?? 0,
+            tips: raw?.ATS?.tips ?? [],
+        },
+        toneAndStyle: {
+            score: raw?.toneAndStyle?.score ?? 0,
+            tips: raw?.toneAndStyle?.tips ?? [],
+        },
+        content: {
+            score: raw?.content?.score ?? 0,
+            tips: raw?.content?.tips ?? [],
+        },
+        structure: {
+            score: raw?.structure?.score ?? 0,
+            tips: raw?.structure?.tips ?? [],
+        },
+        skills: {
+            score: raw?.skills?.score ?? 0,
+            tips: raw?.skills?.tips ?? [],
+        },
+    };
 }
 
-export default function Home() {
-  const { auth, kv } = usePuterStore();
-  const navigate = useNavigate();
-  const [resumes, setResumes] = useState<Resume[]>([]);
-  const [loadingResumes, setLoadingResumes] = useState(false);
+export default function Resume() {
+    const navigate = useNavigate();
+    const { id } = useParams<{ id: string }>();
+    const [resume, setResume] = useState<StoredAnalysis | null>(null);
 
-  useEffect(() => {
-    if(!auth.isAuthenticated) navigate('/auth?next=/');
-  }, [auth.isAuthenticated])
+    useEffect(() => {
+        if (!id) {
+            navigate('/');
+            return;
+        }
 
-  useEffect(() => {
-    const loadResumes = async () => {
-      setLoadingResumes(true);
+        const raw = sessionStorage.getItem(`analysis:${id}`);
 
-      const resumes = (await kv.list('resume:*', true)) as KVItem[];
+        if (!raw) {
+            navigate('/');
+            return;
+        }
 
-      const parsedResumes = resumes?.map((resume) => (
-          JSON.parse(resume.value) as Resume
-      ))
+        try {
+            const parsed = JSON.parse(raw) as StoredAnalysis;
+            setResume(parsed);
+        } catch (error) {
+            console.error('Failed to parse stored analysis:', error);
+            navigate('/');
+        }
+    }, [id, navigate]);
 
-      setResumes(parsedResumes || []);
-      setLoadingResumes(false);
-    }
+    if (!resume) return null;
 
-    loadResumes()
-  }, []);
+    const feedback = normalizeFeedback(resume.feedback);
 
-  return <main className="bg-[url('/images/bg-main.svg')] bg-cover">
-    <Navbar />
+    return (
+        <main className="min-h-screen bg-[#f6f8ff] text-slate-900">
+            <Navbar />
 
-    <section className="main-section">
-      <div className="page-heading py-16">
-        <h1>Track Your Applications & Resume Ratings</h1>
-        {!loadingResumes && resumes?.length === 0 ? (
-            <h2>No resumes found. Upload your first resume to get feedback.</h2>
-        ): (
-          <h2>Review your submissions and check AI-powered feedback.</h2>
-        )}
-      </div>
-      {loadingResumes && (
-          <div className="flex flex-col items-center justify-center">
-            <img src="/images/resume-scan-2.gif" className="w-[200px]" />
-          </div>
-      )}
+            <section className="px-6 pb-16 pt-10 md:px-10 lg:px-16">
+                <div className="mx-auto max-w-6xl">
+                    <button
+                        onClick={() => navigate('/')}
+                        className="mb-8 text-sm text-slate-600 hover:text-slate-900"
+                    >
+                        ← Back to home
+                    </button>
 
-      {!loadingResumes && resumes.length > 0 && (
-        <div className="resumes-section">
-          {resumes.map((resume) => (
-              <ResumeCard key={resume.id} resume={resume} />
-          ))}
-        </div>
-      )}
+                    <div className="mb-8 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+                        <p className="text-sm font-medium text-blue-600">
+                            Resume Analysis
+                        </p>
+                        <h1 className="mt-2 text-3xl font-bold">
+                            {resume.jobTitle || 'Resume'}
+                        </h1>
+                        <p className="mt-2 text-slate-500">
+                            {resume.companyName || 'Analysis Result'}
+                        </p>
+                    </div>
 
-      {!loadingResumes && resumes?.length === 0 && (
-          <div className="flex flex-col items-center justify-center mt-10 gap-4">
-            <Link to="/upload" className="primary-button w-fit text-xl font-semibold">
-              Upload Resume
-            </Link>
-          </div>
-      )}
-    </section>
-  </main>
+                    <div className="space-y-6">
+                        <Summary feedback={feedback} />
+                        <ATS score={feedback.ATS.score} tips={feedback.ATS.tips} />
+                        <Details feedback={feedback} />
+                    </div>
+                </div>
+            </section>
+        </main>
+    );
 }

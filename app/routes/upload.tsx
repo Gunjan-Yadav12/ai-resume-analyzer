@@ -1,126 +1,277 @@
-import {type FormEvent, useState} from 'react'
-import Navbar from "~/components/Navbar";
-import FileUploader from "~/components/FileUploader";
-import {usePuterStore} from "~/lib/puter";
-import {useNavigate} from "react-router";
-import {convertPdfToImage} from "~/lib/pdf2img";
-import {generateUUID} from "~/lib/utils";
-import {prepareInstructions} from "../../constants";
+import { type FormEvent, useState } from 'react';
+import { useNavigate } from 'react-router';
+import Navbar from '~/components/Navbar';
+import FileUploader from '~/components/FileUploader';
+import { generateUUID } from '~/lib/utils';
+import { prepareInstructions } from '../../constants';
+import { analyzeResume } from '~/lib/gemini';
+import { extractTextFromPdf } from '~/lib/pdfExtract';
 
-const Upload = () => {
-    const { auth, isLoading, fs, ai, kv } = usePuterStore();
+export default function Upload() {
     const navigate = useNavigate();
+
     const [isProcessing, setIsProcessing] = useState(false);
     const [statusText, setStatusText] = useState('');
     const [file, setFile] = useState<File | null>(null);
 
-    const handleFileSelect = (file: File | null) => {
-        setFile(file)
-    }
+    const handleFileSelect = (selectedFile: File | null) => {
+        setFile(selectedFile);
+    };
 
-    const handleAnalyze = async ({ companyName, jobTitle, jobDescription, file }: { companyName: string, jobTitle: string, jobDescription: string, file: File  }) => {
-        setIsProcessing(true);
+ const handleAnalyze = async ({
+    companyName,
+    jobTitle,
+    jobDescription,
+    file,
+}: {
+    companyName: string;
+    jobTitle: string;
+    jobDescription: string;
+    file: File;
+}) => {
+    setIsProcessing(true);
+    setStatusText('');
 
-        setStatusText('Uploading the file...');
-        const uploadedFile = await fs.upload([file]);
-        if(!uploadedFile) return setStatusText('Error: Failed to upload file');
+    try {
+        const resumeId = generateUUID();
 
-        setStatusText('Converting to image...');
-        const imageFile = await convertPdfToImage(file);
-        if(!imageFile.file) return setStatusText('Error: Failed to convert PDF to image');
+        setStatusText('Reading PDF...');
+        const resumeText = await extractTextFromPdf(file);
 
-        setStatusText('Uploading the image...');
-        const uploadedImage = await fs.upload([imageFile.file]);
-        if(!uploadedImage) return setStatusText('Error: Failed to upload image');
-
-        setStatusText('Preparing data...');
-        const uuid = generateUUID();
-        const data = {
-            id: uuid,
-            resumePath: uploadedFile.path,
-            imagePath: uploadedImage.path,
-            companyName, jobTitle, jobDescription,
-            feedback: '',
+        if (!resumeText.trim()) {
+            throw new Error('Could not extract text from this PDF.');
         }
-        await kv.set(`resume:${uuid}`, JSON.stringify(data));
 
-        setStatusText('Analyzing...');
+        // hard cap input size — resume analyzers do not need infinite text
+        const trimmedResumeText = resumeText.slice(0, 8000);
+const safeJobDescription = jobDescription.trim().slice(0, 4000);
 
-        const feedback = await ai.feedback(
-            uploadedFile.path,
-            prepareInstructions({ jobTitle, jobDescription })
-        )
-        if (!feedback) return setStatusText('Error: Failed to analyze resume');
+        setStatusText('Analyzing ATS match and feedback...');
+        const rawFeedback = await analyzeResume(
+            trimmedResumeText,
+            prepareInstructions({
+                jobTitle,
+                jobDescription: safeJobDescription,
+            })
+        );
 
-        const feedbackText = typeof feedback.message.content === 'string'
-            ? feedback.message.content
-            : feedback.message.content[0].text;
+        let parsedFeedback: Feedback;
+        try {
+            parsedFeedback = JSON.parse(rawFeedback) as Feedback;
+            console.log('parsedFeedback', parsedFeedback);
+        } catch {
+            console.error('Raw Gemini response:', rawFeedback);
+            throw new Error('AI returned invalid JSON.');
+        }
 
-        data.feedback = JSON.parse(feedbackText);
-        await kv.set(`resume:${uuid}`, JSON.stringify(data));
+        const analysisResult = {
+            id: resumeId,
+            companyName,
+            jobTitle,
+            jobDescription: safeJobDescription,
+            feedback: parsedFeedback,
+            createdAt: Date.now(),
+        };
+
+        sessionStorage.setItem(
+            `analysis:${resumeId}`,
+            JSON.stringify(analysisResult)
+        );
+
         setStatusText('Analysis complete, redirecting...');
-        console.log(data);
-        navigate(`/resume/${uuid}`);
+        navigate(`/resume/${resumeId}`);
+    } catch (err) {
+        console.error('handleAnalyze error:', err);
+        setStatusText(
+            `Error: ${err instanceof Error ? err.message : String(err)}`
+        );
+    } finally {
+        setIsProcessing(false);
     }
+};
+
 
     const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
         e.preventDefault();
-        const form = e.currentTarget.closest('form');
-        if(!form) return;
-        const formData = new FormData(form);
 
-        const companyName = formData.get('company-name') as string;
-        const jobTitle = formData.get('job-title') as string;
-        const jobDescription = formData.get('job-description') as string;
+        const formData = new FormData(e.currentTarget);
 
-        if(!file) return;
+        const companyName = (formData.get('company-name') as string) || '';
+        const jobTitle = (formData.get('job-title') as string) || '';
+        const jobDescription = (formData.get('job-description') as string) || '';
 
-        handleAnalyze({ companyName, jobTitle, jobDescription, file });
-    }
+        if (!file) {
+            setStatusText('Error: Please select a PDF file first');
+            return;
+        }
+
+        if (!companyName.trim()) {
+            setStatusText('Error: Please enter a company name');
+            return;
+        }
+
+        if (!jobTitle.trim()) {
+            setStatusText('Error: Please enter a job title');
+            return;
+        }
+
+        handleAnalyze({
+            companyName: companyName.trim(),
+            jobTitle: jobTitle.trim(),
+            jobDescription: jobDescription.trim(),
+            file,
+        });
+    };
 
     return (
-        <main className="bg-[url('/images/bg-main.svg')] bg-cover">
+        <main className="min-h-screen bg-[#f6f8ff] text-slate-900">
             <Navbar />
 
-            <section className="main-section">
-                <div className="page-heading py-16">
-                    <h1>Smart feedback for your dream job</h1>
-                    {isProcessing ? (
-                        <>
-                            <h2>{statusText}</h2>
-                            <img src="/images/resume-scan.gif" className="w-full" />
-                        </>
-                    ) : (
-                        <h2>Drop your resume for an ATS score and improvement tips</h2>
-                    )}
-                    {!isProcessing && (
-                        <form id="upload-form" onSubmit={handleSubmit} className="flex flex-col gap-4 mt-8">
-                            <div className="form-div">
-                                <label htmlFor="company-name">Company Name</label>
-                                <input type="text" name="company-name" placeholder="Company Name" id="company-name" />
-                            </div>
-                            <div className="form-div">
-                                <label htmlFor="job-title">Job Title</label>
-                                <input type="text" name="job-title" placeholder="Job Title" id="job-title" />
-                            </div>
-                            <div className="form-div">
-                                <label htmlFor="job-description">Job Description</label>
-                                <textarea rows={5} name="job-description" placeholder="Job Description" id="job-description" />
+            <section className="px-6 pb-16 pt-10 md:px-10 lg:px-16">
+                <div className="mx-auto grid max-w-7xl gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-start">
+                    {/* LEFT SIDE */}
+                    <div className="pt-4">
+                        <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-4 py-1 text-sm font-medium text-blue-700">
+                            AI Resume Analysis
+                        </span>
+
+                        <h1 className="mt-5 max-w-2xl text-4xl font-bold leading-tight md:text-5xl">
+                            Upload your resume and get ATS feedback that actually tells you what to fix
+                        </h1>
+
+                        <p className="mt-5 max-w-2xl text-lg leading-8 text-slate-600">
+                            Paste the job description, upload your PDF resume, and get a structured ATS score,
+                            content review, keyword feedback, and actionable improvements.
+                        </p>
+
+                        <div className="mt-8 grid gap-4 sm:grid-cols-3">
+                            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                                <p className="text-sm font-semibold text-slate-900">ATS Match</p>
+                                <p className="mt-2 text-sm text-slate-500">
+                                    Check keyword relevance, formatting and structure.
+                                </p>
                             </div>
 
-                            <div className="form-div">
-                                <label htmlFor="uploader">Upload Resume</label>
-                                <FileUploader onFileSelect={handleFileSelect} />
+                            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                                <p className="text-sm font-semibold text-slate-900">Actionable Feedback</p>
+                                <p className="mt-2 text-sm text-slate-500">
+                                    See exactly what to improve section by section.
+                                </p>
                             </div>
 
-                            <button className="primary-button" type="submit">
-                                Analyze Resume
-                            </button>
-                        </form>
-                    )}
+                            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                                <p className="text-sm font-semibold text-slate-900">Job-Based Review</p>
+                                <p className="mt-2 text-sm text-slate-500">
+                                    Compare your resume against the role you’re applying for.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* RIGHT SIDE CARD */}
+                    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-xl md:p-8">
+                        {isProcessing ? (
+                            <div className="flex min-h-[520px] flex-col items-center justify-center gap-5 text-center">
+                                <img
+                                    src="/images/resume-scan.gif"
+                                    className="w-full max-w-sm"
+                                    alt="Analyzing resume..."
+                                />
+                                <div>
+                                    <h2 className="text-2xl font-semibold">Analyzing your resume</h2>
+                                    <p className="mt-2 text-slate-500">{statusText}</p>
+                                </div>
+                            </div>
+                        ) : (
+                            <>
+                                <div className="mb-6">
+                                    <h2 className="text-2xl font-bold">Analyze Resume</h2>
+                                    <p className="mt-2 text-sm text-slate-500">
+                                        Fill in the role details and upload your resume PDF.
+                                    </p>
+                                </div>
+
+                                {statusText && statusText.startsWith('Error') && (
+                                    <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                                        {statusText}
+                                    </div>
+                                )}
+
+                                <form onSubmit={handleSubmit} className="space-y-5">
+                                    <div>
+                                        <label
+                                            htmlFor="company-name"
+                                            className="mb-2 block text-sm font-medium text-slate-700"
+                                        >
+                                            Company Name
+                                        </label>
+                                        <input
+                                            type="text"
+                                            name="company-name"
+                                            id="company-name"
+                                            placeholder="e.g. Google"
+                                            required
+                                            className="w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none transition focus:border-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label
+                                            htmlFor="job-title"
+                                            className="mb-2 block text-sm font-medium text-slate-700"
+                                        >
+                                            Job Title
+                                        </label>
+                                        <input
+                                            type="text"
+                                            name="job-title"
+                                            id="job-title"
+                                            placeholder="e.g. Frontend Developer"
+                                            required
+                                            className="w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none transition focus:border-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label
+                                            htmlFor="job-description"
+                                            className="mb-2 block text-sm font-medium text-slate-700"
+                                        >
+                                            Job Description
+                                        </label>
+                                        <textarea
+                                            rows={6}
+                                            name="job-description"
+                                            id="job-description"
+                                            placeholder="Paste the job description here..."
+                                            className="w-full rounded-2xl border border-slate-200 px-4 py-3 outline-none transition focus:border-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label
+                                            htmlFor="uploader"
+                                            className="mb-2 block text-sm font-medium text-slate-700"
+                                        >
+                                            Upload Resume (PDF)
+                                        </label>
+                                        <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4">
+                                            <FileUploader onFileSelect={handleFileSelect} />
+                                        </div>
+                                    </div>
+
+                                    <button
+                                        type="submit"
+                                        className="w-full rounded-2xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
+                                    >
+                                        Analyze Resume
+                                    </button>
+                                </form>
+                            </>
+                        )}
+                    </div>
                 </div>
             </section>
         </main>
-    )
+    );
 }
-export default Upload
